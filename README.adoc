@@ -19,7 +19,7 @@ ifndef::java_version[:java_version: 11]
 * http://www.oracle.com/technetwork/java/javase/downloads/index.html[JDK {java_version}]
 * https://gradle.org/install/[Gradle]
 * https://spring.io/tools[Spring Tools] for your coding environment
-* Clone this repo with `git@code.panderasystems.com:jade.hollowell/spring-kafka-ccloud.git`
+* Clone this repo with `git@github.com:javahollow/spring-kafka-ccloud.git`
 
 
 == How It Works
