@@ -1,0 +1,269 @@
+:spring_version: 2.4.5
+:toc:
+:project_id: spring-ccloud
+:icons: font
+:source-highlighter: prettify
+
+== What It Is
+
+A demo project built with Java + Spring boot, and utilizing Spring for Apache Kafka and Confluent Cloud.
+
+== What You Need
+
+:java_version: 11
+:linkattrs:
+
+ifndef::java_version[:java_version: 11]
+
+* A favorite text editor or IDE
+* http://www.oracle.com/technetwork/java/javase/downloads/index.html[JDK {java_version}]
+* https://gradle.org/install/[Gradle]
+* https://spring.io/tools[Spring Tools] for your coding environment
+* Clone this repo with `git@code.panderasystems.com:jade.hollowell/spring-kafka-ccloud.git`
+
+
+== How It Works
+
+=== Resources
+
+The Kafka configuraion is located in `src/main/resources/application.properties`:
+
+====
+[source,java]
+----
+spring.kafka.properties.sasl.mechanism=PLAIN
+spring.kafka.properties.bootstrap.servers=pkc-3w22w.us-central1.gcp.confluent.cloud:9092
+spring.kafka.properties.sasl.jaas.config=org.apache.kafka.common.security.plain.PlainLoginModule   required username='{{ CLUSTER_API_KEY }}'  password='{{ CLUSTER_API_SECRET }}';
+spring.kafka.properties.security.protocol=SASL_SSL
+
+spring.kafka.producer.key-serializer=org.apache.kafka.common.serialization.IntegerSerializer
+spring.kafka.producer.value-serializer=org.apache.kafka.common.serialization.StringSerializer
+spring.kafka.consumer.key-deserializer=org.apache.kafka.common.serialization.StringDeserializer
+spring.kafka.consumer.value-deserializer=org.apache.kafka.common.serialization.LongDeserializer
+
+spring.kafka.producer.client-id=spring-boot-producer
+spring.kafka.streams.replication-factor=3
+spring.kafka.streams.application-id=spring-boot-streams
+----
+====
+
+=== SpringCcloudApplication
+
+The main application is configured in `src/main/java/io/confluent/developer/spring/SpringCcloudApplication.java`. 
+
+NOTE: You can create multiple beans with type `NewTopic`, which is Kafka's `AdminClient` type. Those topics will then be created in a Kafka cluster.
+
+The `@SpringBootApplication` annotation is used to mark a configuration class that declares one or more @Bean methods and also triggers auto-configuration and component scanning. It's the same as declaring a class with @Configuration, @EnableAutoConfiguration and @ComponentScan annotations. 
+
+The `@EnableKafkaStreams` annotation automatically imports the default config class KafkaStreamsDefaultConfiguration. The `@Bean` annotation returns an object that spring registers as a bean (object) in application context. The logic inside the method is responsible for creating the instance.
+
+`NewTopic` creates a bean with the number of partitions and replicas specified in the application class. `TopicBuilder` establishes the topic, and Spring uses the topic configuration to automatically instantiate an `AdminClient` to execute the required operations.
+
+TIP: You can use `TopicBuilder` methods to provide some of the standard configurations like number of partitions, number of replicas, compaction, and so on. You can also use some extra configuration parameters that may not have API methods.
+
+====
+[source,java]
+----
+@SpringBootApplication
+@EnableKafkaStreams
+public class SpringCcloudApplication {
+
+	public static void main(String[] args) {
+		SpringApplication.run(SpringCcloudApplication.class, args);
+	}
+
+	@Bean
+	NewTopic hobbit2() {
+		return TopicBuilder.name("hobbit2").partitions(15).replicas(3).build();
+	}
+
+	@Bean
+	NewTopic counts() {
+		return TopicBuilder.name("streams-wordcount-output").partitions(6).replicas(3).build();
+	}
+
+}
+----
+====
+
+=== Producer Component
+
+The Producer component is defined in `src/main/java/io/confluent/developer/spring/components/Producer.java`.
+
+NOTE: In order to create a new instance of the Kafka template, you need a `ProducerFactory`, which is responsible for instantiating the underlying Kafka producer. A `ProducerFactory` requires a configuration, which is a simple map if you are using code-based configuration (you can also use automatic configuration based on property files).
+
+`@RequiredArgsConstructor` generates a constructor with 1 parameter for each field that requires special handling. All non-initialized final fields get a parameter, as well as any fields that are marked as @NonNull that aren't initialized where they are declared. `@Component` is an annotation that allows Spring to automatically detect our custom beans.
+
+`KafkaTemplate` wraps a producer and provides convenient methods to send data to Kafka topics. `Faker` utilizes JavaFaker, a library that can be used to generate a wide array of real-looking data from addresses to popular culture references.
+
+`@EventListener` is used to create a method that listens for spring boot events. `Flux` is a reactive library that lets you push a message per second.
+
+TIP: `Flux.zip` combines the two Flux parameters and sends your messages to the topic `hobbit` on Confluent Cloud. `Faker.random()` generates your keys and the `@EventListener` annotation from Spring runs the class when the application is started.
+
+====
+[source,java]
+----
+@RequiredArgsConstructor
+@Component
+class Producer {
+
+	private final KafkaTemplate<Integer, String> template;
+
+	Faker faker;
+
+	@EventListener(ApplicationStartedEvent.class)
+	public void generate() {
+
+		faker = Faker.instance();
+		final Flux<Long> interval = Flux.interval(Duration.ofMillis(1_000));
+
+		final Flux<String> quotes = Flux.fromStream(Stream.generate(() -> faker.hobbit().quote()));
+
+		Flux.zip(interval, quotes)
+				.map(it -> template.send("hobbit", faker.random().nextInt(42), it.getT2())).blockLast();
+	}
+}
+----
+====
+
+=== Consumer Component
+
+The Consumer component is defined in `src/main/java/io/confluent/developer/spring/components/Consumer.java`.
+
+NOTE: Factories drive a lot of functionality in Spring Boot. Similar to how the `ProducerFactory` used above instantiates Apache Kafka producers, `ConsumerFactory` instantiates Kafka consumers. For a `ConsumerFactory`, you need to provide the property files or configurations that your consumer will use. 
+
+`@Component` is an annotation that allows Spring to automatically detect our custom beans. `@KafkaListener` allows a method to consume messages from Kafka topic(s). 
+
+`ConsumerRecord` is a key/value pair to be received from Kafka. This consists of a topic name and a partition number, from which the record is being received and an offset that points to the record in a Kafka partition.
+
+TIP: Inside of Spring Boot, the components that integrate with messaging systems follow the pattern of “message-driven POJOs.” Message-driven POJOs enable asynchronous communication between systems, so essentially you define a message listener and the framework takes care of the functionality. 
+
+====
+[source,java]
+----
+@Component
+class Consumer {
+	@KafkaListener(topics = { "streams-wordcount-output" }, groupId = "spring-boot-kafka")
+	public void consume(ConsumerRecord<String, Long> record) {
+		System.out.println("received = " + record.value() + " with key " + record.key());
+	}
+}
+----
+====
+
+=== Processor Component
+
+The Processor component is defined in `src/main/java/io/confluent/developer/spring/components/Processor.java`.
+
+NOTE: To build your Streams topology, you need a StreamsBuilder as an input parameter. Spring Boot can create it with defaults or you can do it explicitly. 
+
+`@Component` allows Spring to automatically detect our custom beans. `@Autowired` is an annotation that allows Spring to resolve and inject collaborating beans into our bean. 
+
+`StreamsBuilder` gives us access to all of the Kafka Streams APIs, and it becomes like a regular Kafka Streams application. `Serde` is a wrapper for serializer and deserializer of a data type. `KStream` is an abstraction of a record stream of KeyValue pairs. 
+
+`KTable` is an abstraction of a changelog stream, where each data record represents an update. It will process the streamed data, splitting each message into words with `flatMapValues`, grouping, and then counting.
+
+TIP: A serializer and deserializer for grouping is set in `groupBy`. And `Materialized.as("counts")` creates the local state store that will be available for querying by the `RestService`.
+
+====
+[source,java]
+----
+@Component
+class Processor {
+	@Autowired
+	public void process(StreamsBuilder builder) {
+		final Serde<Integer> integerSerde = Serdes.Integer();
+		final Serde<String> stringSerde = Serdes.String();
+		final Serde<Long> longSerde = Serdes.Long();
+
+		KStream<Integer, String> textLines = builder.stream("hobbit", Consumed.with(integerSerde, stringSerde));
+
+		KTable<String, Long> wordCounts = textLines
+				.flatMapValues(value -> Arrays.asList(value.toLowerCase().split("\\W+")))
+				.groupBy((key, value) -> value, Grouped.with(stringSerde, stringSerde))
+				.count(Materialized.as("counts"));
+
+		wordCounts.toStream().to("streams-wordcount-output", Produced.with(stringSerde, longSerde));
+	}
+}
+----
+====
+
+=== RestService Controller
+
+The RestService controller is defined in `src/main/java/io/confluent/developer/spring/controllers/RestService.java`.
+
+NOTE: Kafka Streams and Spring Boot are particularly powerful when you use a REST endpoint where the application's state store can be accessed.
+
+`@RestController` is a convenience annotation for creating Restful controllers. It is a specialization of @Component and adds the @Controller and @ResponseBody annotations. It converts the response to JSON or XML. `@RequiredArgsConstructor` generates a constructor with 1 parameter for each field that requires special handling.
+
+`StreamsBuilderFactoryBean` is an AbstractFactoryBean for the StreamsBuilder instance and lifecycle control for the internal KafkaStreams instance. It gives us access to the Kafka Streams instance. `@GetMapping` is an annotation for mapping HTTP GET requests onto specific handler methods. It acts as a shortcut for @RequestMapping.
+
+`KafkaStreams` is the interface for managing and inspecting the execution environment of the processing topology of a Kafka Streams application. `ReadOnlyKeyValueStore` is a key-value store that only supports read operations. Implementations should be thread-safe as concurrent reads and writes are expected.
+
+====
+[source,java]
+----
+@RestController
+@RequiredArgsConstructor
+class RestService {
+	private final StreamsBuilderFactoryBean factoryBean;
+
+	@GetMapping("/count/{word}")
+	public Long getCount(@PathVariable String word) {
+		final KafkaStreams kafkaStreams = factoryBean.getKafkaStreams();
+		final ReadOnlyKeyValueStore<String, Long> counts = kafkaStreams
+				.store(StoreQueryParameters.fromNameAndType("counts", QueryableStoreTypes.keyValueStore()));
+		return counts.get(word);
+	}
+}
+----
+====
+
+== Set Up Confluent Cloud
+
+. Open a browser and navigate to https://confluent.cloud/signup[Confluent Cloud] (if you don't have an account, you can sign up for a free trial).
+
+. In the default environment, go to *Add Cluster*, then create a Basic cluster, and click *Begin configuration*.
+
+. Select Google Cloud, a close region, and single zone availability (the associated costs are listed, but the free usage will be more than enough for this project). Name your cluster `spring_kafka_0` and click *Launch cluster*. Keep in mind that you should delete your cluster when you are finished with it.
+
+. To get your Spring Boot config, go to *Data Integration* > *Clients* and select *Spring Boot*. Underneath the config, select *Create Kafka cluster API key & secret*. Copy those credentials - you'll need them later. Add the description `spring kafka demo` and click *Continue* to populate your credentials.
+
+'''
+
+=== Add Confluent Cloud Credentials to Spring
+
+. Copy the 4 configs for `kafka.properties`, click *Done*, and then go back to your IDE.
+
+. In `src/main/resources/application.properties`, replace the 4 configs for `kafka.properties` with your own.
+
+. Make sure to replace `{{ CLUSTER_API_KEY }}` and `{{ CLUSTER_API_SECRET }}` with your credentials that you created earlier.
+
+'''
+
+=== Create a Topic on Confluent Cloud
+
+. Set up a topic to send to on Confluent Cloud. Go to the cluster you created, select *Topics* > *Add topic* and then create the new topic `hobbit`, using *Create with defaults*.
+
+. Go to your IDE and run your application, then return to Confluent Cloud. Navigate to your cluster, then *Topics*, `hobbit`, and *Messages*, and you should see your first events streamed to Confluent Cloud. 
+
+. You should also see `hobbit` messages arrive in your IDE's console.
+
+'''
+
+=== Inspect Your Data on Confluent Cloud
+
+. In Confluent Cloud, go to *Data Integration* > *Clients* > *Consumers*. You'll see the group `spring-boot-kafka`, and you can see that the consumer group is using all six partitions in your topic. You can also see offsets and consumer lag.
+
+. Click on *Topic* > `hobbit` > *See in Stream lineage* and you can see the topic and its dependencies, i.e., your producer and consumer apps.
+
+. Click on *Topics* > `streams-wordcount-output` > *Messages*, and then click the table icon in the upper-right-hand corner. You can see each word as a key. 
+
+. Finally, take a look at the *Stream lineage* for your topic `streams-wordcount-output`. You can see your producers feeding your `hobbit` topic, which flows into your Kafka Streams app `spring-boot-streams`, then through to your `streams-wordcount-output topic`, and finally to your `spring-boot-kafka` consumer.
+
+'''
+
+=== Inspect a REST Endpoint
+
+You can also use Spring Boot with Kafka Streams as an API server, not just as a processing application. For example, http://localhost:8080/count/dragon will show you a count of the appearances of the word “dragon”.
